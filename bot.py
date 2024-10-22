@@ -51,9 +51,13 @@ def convert_rich_text_to_slack_format(rich_text):
 
                 # Handle hyperlink
                 elif sub_element["type"] == "link":
-                    url = sub_element["url"]
-                    link_text = sub_element["text"]
-                    formatted_text += f"<{url}|{link_text}> "
+                    # Check if "url" and "text" are available
+                    url = sub_element.get("url", "")
+                    link_text = sub_element.get("text", "")
+                    if link_text:
+                        formatted_text += f"<{url}|{link_text}> "  # Use link text if available
+                    else:
+                        formatted_text += f"<{url}|{url}> "  # Fallback to URL if no text is provided
 
                 # Handle emoji
                 elif sub_element["type"] == "emoji":
@@ -86,6 +90,7 @@ def convert_rich_text_to_slack_format(rich_text):
     return formatted_text.strip()
 
 
+
 # Messages user if they join the slack server
 @slack_event_adapter.on("team_join")
 def handle_team_join(event_data):
@@ -113,7 +118,7 @@ def update_home_tab(event_data):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "*Welcome to the Viaka Bot home page!* :tada:"
+                        "text": "*Welcome to the Viaka Bot home page!* :tada: Please see the *About* tab for any questions. :thinking_face: "
                     }
                 },
                 {
@@ -135,7 +140,7 @@ def update_home_tab(event_data):
                     "fields": [
                         {
                             "type": "mrkdwn",
-                            "text": f"*{full_name}*\nHi there!\n\nPlease make to *Update Your Profile* :pencil2:\n\n\n*Introduce yourself* to everyone! :wave:" 
+                            "text": f"*{full_name}*\nHi there!\n\nPlease make sure to *Update Your Profile* :pencil2:\n\n\n*Introduce yourself* to everyone! :wave:" 
                         },
                     ],
                     "accessory": {
@@ -296,10 +301,29 @@ def slack_actions():
         # Send the introduction to the selected channel
         if introduction and selected_channel:
             try:
+                # Get user profile information to fetch the profile picture URL
+                user_info = client.users_info(user=user_id)
+                profile_pic_url = user_info["user"]["profile"].get("image_48")  # You can adjust the size as needed
+
+                # Create a message with blocks
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*New Introduction from <@{user_id}>:*\n\n{introduction}"
+                        },
+                        "accessory": {
+                            "type": "image",
+                            "image_url": profile_pic_url,
+                            "alt_text": f"{user_info['user']['real_name']}'s profile picture"  # Alt text for accessibility
+                        }
+                    }
+                ]
+
                 client.chat_postMessage(
-                channel=selected_channel, 
-                text=f"New Introduction from <@{user_id}>: {introduction}",
-                unfurl_links=False
+                    channel=selected_channel,
+                    blocks=blocks
                 )
                 print("Introduction sent to the selected channel.")
             except slack.errors.SlackApiError as e:
@@ -308,7 +332,6 @@ def slack_actions():
             print("Introduction or channel selection is missing.")
 
     return "", 200
-
 
 #ngrok testing
 if __name__ == "__main__":
