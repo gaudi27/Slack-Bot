@@ -1,11 +1,15 @@
 #imports
-import slack
+import slack_sdk
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, request
 from slackeventsapi import SlackEventAdapter
 import json
+from flask import Flask, request, jsonify
+from sqlConnector import load_profile_from_db, save_profile_to_db
+from slack_sdk.errors import SlackApiError
+
 
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
@@ -15,7 +19,7 @@ app = Flask(__name__)
 slack_event_adapter = SlackEventAdapter(os.environ['SIGNING_SECRET'], '/slack/events', app)
 
 # Gets slack token
-client = slack.WebClient(token=os.environ['SLACK_TOKEN'])
+client = slack_sdk.WebClient(token= os.environ['SLACK_TOKEN'])
 
 # Send a test message when the bot starts
 #client.chat_postMessage(channel='#test', text="Hello World!")
@@ -99,8 +103,42 @@ def handle_team_join(event_data):
     
     # Send a DM to the new user
     client.chat_postMessage(channel=user_id, text=welcome_message)
-# Simulated persistent storage for user profiles (in a real application, use a database)
+
 user_profiles = {}
+
+def send_introduction_message(user_id, channel_id, intro_text):
+    # Fetch the user’s profile from the database
+    profile = load_profile_from_db(user_id)
+
+    # Default to the user's name if no profile is found
+    full_name = profile.get("full_name", "User")
+
+    # Post the introduction message with a "View Profile" button
+    client.chat_postMessage(
+        channel=channel_id,
+        text=f"{full_name} introduced themselves:\n\n{intro_text}",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{full_name}* introduced themselves:\n\n{intro_text}"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View Profile"},
+                        "value": user_id,
+                        "action_id": "view_profile_button"
+                    }
+                ]
+            }
+        ]
+    )
+
 
 # Handle app_home_opened event to update the Home Tab
 @slack_event_adapter.on("app_home_opened")
@@ -108,18 +146,23 @@ def update_home_tab(event_data):
     user_id = event_data["event"]["user"]
 
     try:
-        # Get user profile info from Slack (full name and profile picture)
+        # Default info
         user_info = client.users_info(user=user_id)
         full_name = user_info['user']['profile'].get('real_name', 'User')  # Get the full name or default to 'User'
         profile_picture_url = user_info['user']['profile'].get('image_192', '')  # Get the profile picture URL
 
-        # Check if the user has a custom profile saved, otherwise use the default message
-        profile = user_profiles.get(user_id, {
-            "full_name": full_name,
-            "bio": "Hi there!\nPlease make sure to *Update Your Profile* :pencil2:\n\n\n*Introduce yourself* to everyone! :wave:"
-        })
+        # Get profile from db
+        profile = load_profile_from_db(user_id)
 
-        # Define the Home Tab layout
+        # If not in database, provide default info
+        if not profile:
+
+            # Check if the user has a custom profile saved, otherwise use the default message
+            profile = user_profiles.get(user_id, {
+                "full_name": full_name,
+                "bio": "Hi there!\nPlease make sure to *Update Your Profile* :pencil2:\n\n\n*Introduce yourself* to everyone! :wave:"
+            })
+
        # Define the Home Tab layout
         profile_blocks = [
             {
@@ -143,7 +186,7 @@ def update_home_tab(event_data):
             ("Pronouns", "pronouns"),
             (":round_pushpin: Location", "location"),
             (":house: Hometown", "hometown"),
-            (":school: Education", "education"),
+            (":mortar_board: Education", "education"),
             (":speech_balloon: Languages", "languages"),
             (":clapper: Hobbies", "hobbies"),
             (":birthday: Birthday", "birthday"),
@@ -219,6 +262,17 @@ def update_home_tab(event_data):
                             "action_id": "reset_profile_button"
                         }
                     ]
+                },
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": ":earth_americas: Meet Someone Within the Community!",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "divider"
                 }
             ]
         }
@@ -230,24 +284,47 @@ def update_home_tab(event_data):
             view=view
         )
 
-    except slack.errors.SlackApiError as e:
+    except slack_sdk.errors.SlackApiError as e:
         print(f"Error publishing home tab: {e.response['error']}")
 
 
 # Handle button interactions and modal submissions
 @app.route("/slack/actions", methods=["POST"])
 def slack_actions():
+    print("Request Headers:", request.headers)
     payload = request.form["payload"]
     data = json.loads(payload)
+    payload = request.form.get("payload")
+    
+    if payload:
+        try:
+            # Parse the JSON string into a Python dictionary
+            payload = json.loads(payload)
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON payload: {e}")
+            return "", 400
 
-    # Check the type of event
+    # Debugging outputs
+    print("Complete Payload:", payload)
+    print("Payload Actions:", payload.get("actions"))
+
+    # Check and handle the action
+    actions = payload.get("actions", [])
+    if actions:
+        first_action = actions[0]
+        action_id = first_action.get("action_id")
+        user_id = first_action.get("value")
+
+
     if data["type"] == "block_actions":
         user_id = data["user"]["id"]
         action_id = data["actions"][0]["action_id"]
 
+        profile = load_profile_from_db(user_id) or {}  # Ensure profile is at least an empty dict
+
         # Handle the profile button interaction
         if action_id == "update_profile_button":
-            # Open a new modal where users can create their profile
+            # Open a new modal where users can create or edit their profile
             profile_modal_view = {
                 "type": "modal",
                 "callback_id": "profile_creation_modal",
@@ -255,7 +332,7 @@ def slack_actions():
                     "type": "plain_text",
                     "text": "Create Your Profile"
                 },
-                "submit": {  # Add a submit button to the modal
+                "submit": {
                     "type": "plain_text",
                     "text": "Submit"
                 },
@@ -267,9 +344,10 @@ def slack_actions():
                             "type": "plain_text_input",
                             "multiline": True,
                             "action_id": "bio",
-                            "placeholder" : {
+                            "initial_value": profile.get("bio", "") or "",
+                            "placeholder": {
                                 "type": "plain_text",
-                                "text": "Small blurb about yourself"
+                                "text": "Small blurb about yourself, be sure to include important links (e.g. LinkedIn)"
                             }
                         },
                         "label": {
@@ -284,7 +362,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "full_name",
-                            "placeholder" : {
+                            "initial_value": profile.get("full_name", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. George Audi"
                             }
@@ -300,7 +379,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "pronouns",
-                            "placeholder" : {
+                            "initial_value": profile.get("pronouns", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. He/him, She/her, They/them"
                             }
@@ -317,7 +397,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "location",
-                            "placeholder" : {
+                            "initial_value": profile.get("location", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. New York"
                             }
@@ -334,10 +415,11 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "hometown",
-                            "placeholder" : {
+                            "initial_value": profile.get("hometown", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. New York"
-                            },
+                            }
                         },
                         "label": {
                             "type": "plain_text",
@@ -351,14 +433,15 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "education",
-                            "placeholder" : {
+                            "initial_value": profile.get("education", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. Boston University"
                             }
                         },
                         "label": {
                             "type": "plain_text",
-                            "text": ":school: Education"
+                            "text": ":mortar_board: Education"
                         },
                         "optional": True
                     },
@@ -368,7 +451,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "languages",
-                            "placeholder" : {
+                            "initial_value": profile.get("languages", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. English, Spanish, Arabic"
                             }
@@ -385,7 +469,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "hobbies",
-                            "placeholder" : {
+                            "initial_value": profile.get("hobbies", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. Golf, Reading, Movies"
                             }
@@ -402,7 +487,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "birthday",
-                            "placeholder" : {
+                            "initial_value": profile.get("birthday", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "e.g. July 27th, 2004"
                             }
@@ -419,7 +505,8 @@ def slack_actions():
                         "element": {
                             "type": "plain_text_input",
                             "action_id": "ask_me_about",
-                            "placeholder" : {
+                            "initial_value": profile.get("ask_me_about", "") or "",  # Default to empty string if not present
+                            "placeholder": {
                                 "type": "plain_text",
                                 "text": "Highlight what makes you excited!"
                             }
@@ -500,6 +587,11 @@ def slack_actions():
 
             # Update the home tab after resetting
             update_home_tab({"event": {"user": user_id}})
+            return jsonify({"response_action": "clear"}), 200
+        
+        elif action_id == "cancel_reset_button":
+            # Close the modal without action
+            return jsonify({"response_action": "clear"}), 200
 
         elif action_id == "introduce_yourself_button":
             # Existing "Introduce Yourself" button functionality
@@ -565,6 +657,109 @@ def slack_actions():
                 view=modal_view
             )
 
+        elif action_id == "view_profile_button":
+            # Check payload structure
+            print("Payload Actions:", payload["actions"])  # Debugging line
+            print("Full Payload:", payload)
+
+            # Safely get user ID from the action payload
+            if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
+                profile_user_id = payload["actions"][0].get("value")
+
+                if profile_user_id:
+                    profile = load_profile_from_db(profile_user_id)
+
+                    # Fetch the user's profile information from Slack (to get the profile picture)
+                    try:
+                        user_info = client.users_info(user=profile_user_id)
+                        profile_pic_url = user_info["user"]["profile"].get("image_512")  # Use a larger image size
+                        user_name = user_info["user"]["real_name"]
+                    except Exception as e:
+                        print(f"Error fetching user info: {e}")
+                        profile_pic_url = None
+                        user_name = "Unknown User"
+
+                    if profile is None:
+                        # Show message if no profile data exists
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": "No profile available for this user."}
+                                }
+                            ]
+                        }
+                    else:
+                        # Construct profile modal using profile data
+                        profile_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Profile of {user_name}*"
+                                },
+                                "accessory": {
+                                    "type": "image",
+                                    "image_url": profile_pic_url,
+                                    "alt_text": f"{user_name}'s profile picture"
+                                }
+                            },
+                            {"type": "divider"},
+                        ]
+
+                        # Construct fields with emojis for each profile attribute
+                        profile_fields = []
+                        if profile.get("full_name"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Full Name:* {profile.get('full_name', 'N/A')}"})
+                        if profile.get("pronouns"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Pronouns:* {profile.get('pronouns', 'N/A')}"})
+                        if profile.get("location"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":round_pushpin: *Location:* {profile.get('location', 'N/A')}"})
+                        if profile.get("hometown"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":house: *Hometown:* {profile.get('hometown', 'N/A')}"})
+                        if profile.get("education"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":mortar_board: *Education:* {profile.get('education', 'N/A')}"})
+                        if profile.get("languages"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":speech_balloon: *Languages:* {profile.get(profile.get('languages', 'N/A'))}"})
+                        if profile.get("hobbies"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":clapper: *Hobbies:* {profile.get(profile.get('hobbies', 'N/A'))}"})
+                        if profile.get("birthday"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":birthday: *Birthday:* {profile.get('birthday', 'N/A')}"})
+                        if profile.get("ask_me_about"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":bulb: *Ask Me About:* {profile.get(profile.get('ask_me_about', 'N/A'))}"})
+
+                        # Add fields to the profile blocks
+                        profile_blocks.append({
+                            "type": "section",
+                            "fields": profile_fields
+                        })
+                        
+                        # Add bio if available
+                        profile_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": profile.get("bio", "No bio available.")}
+                        })
+
+                        # Construct the full profile modal
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": profile_blocks
+                        }
+
+                    # Open the modal to view the profile
+                    client.views_open(
+                        trigger_id=payload["trigger_id"],
+                        view=profile_modal
+                    )
+                else:
+                    print("profile_user_id is missing or None.")
+            else:
+                print("payload['actions'] is not as expected:", payload.get("actions"))
+
+
     elif data["type"] == "view_submission":
         # Debug: Print the entire payload to check its structure
         print("View Submission Payload:", json.dumps(data, indent=2))  # Pretty-print the payload
@@ -601,6 +796,15 @@ def slack_actions():
                 "ask_me_about": ask_me_about if ask_me_about else None,
             }
 
+            # Debug: Print profile before saving
+            print(f"Saving profile for {user_id}: {user_profiles[user_id]}")
+
+            # Save the profile to the database
+            try:
+                save_profile_to_db(user_id, user_profiles[user_id])
+                print(f"Profile saved to database for user {user_id}")
+            except Exception as e:
+                print(f"Error saving profile to database: {e}")
             # Update the Home Tab to reflect the new profile information
             update_home_tab({"event": {"user": user_id}})
 
@@ -648,6 +852,20 @@ def slack_actions():
                                 "image_url": profile_pic_url,
                                 "alt_text": f"{user_info['user']['real_name']}'s profile picture"  # Alt text for accessibility
                             }
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "View Profile"
+                                    },
+                                    "value": user_id,  # Use user ID to link to the profile
+                                    "action_id": "view_profile_button"
+                                }
+                            ]
                         }
                     ]
 
@@ -656,7 +874,7 @@ def slack_actions():
                         blocks=blocks
                     )
                     print("Introduction sent to the selected channel.")
-                except slack.errors.SlackApiError as e:
+                except slack_sdk.errors.SlackApiError as e:
                     print(f"Error sending message to the channel: {e.response['error']}")
             else:
                 print("Introduction or channel selection is missing.")
