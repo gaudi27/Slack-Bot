@@ -7,8 +7,9 @@ from flask import Flask, request
 from slackeventsapi import SlackEventAdapter
 import json
 from flask import Flask, request, jsonify
-from sqlConnector import load_profile_from_db, save_profile_to_db
+from sqlConnector import load_profile_from_db, save_profile_to_db, opt_in_user, opt_out_user, is_user_opted_in, pair_users_weekly
 from slack_sdk.errors import SlackApiError
+from apscheduler.schedulers.background import BackgroundScheduler
 
 
 env_path = Path('.') / '.env'
@@ -139,11 +140,20 @@ def send_introduction_message(user_id, channel_id, intro_text):
         ]
     )
 
-
 # Handle app_home_opened event to update the Home Tab
 @slack_event_adapter.on("app_home_opened")
-def update_home_tab(event_data):
+def update_home_tab(event_data, opted_in=False):
     user_id = event_data["event"]["user"]
+
+    # Create the updated view with the opt-in button
+    if opted_in == True:
+        button_text = "Opt Out"
+        button_value = "opt_out"
+        action_id = "opt_out_button"
+    else:
+        button_text = "Opt In"
+        button_value = "opt_in"
+        action_id = "opt_in_button"
 
     try:
         # Default info
@@ -273,9 +283,39 @@ def update_home_tab(event_data):
                 },
                 {
                     "type": "divider"
+                },
+                {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": 
+                            "The Viaka Slack App provides automated intros with someone random in the community "
+                            "and will give you a little blurb about who they are and what their interests are. "
+                            "You may also view their profile beforehand to get to know more about them."
                 }
-            ]
-        }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": button_text},
+                        "value": button_value,
+                        "action_id": action_id
+                    }
+                ]
+            },
+            {
+                "type": "divider"
+            },{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "_Built in Boston, please contact gaudi@bu.edu for any issues or questions_"
+                }
+            }
+        ]
+    }
 
 
         # Publish the view to the Home Tab
@@ -291,7 +331,6 @@ def update_home_tab(event_data):
 # Handle button interactions and modal submissions
 @app.route("/slack/actions", methods=["POST"])
 def slack_actions():
-    print("Request Headers:", request.headers)
     payload = request.form["payload"]
     data = json.loads(payload)
     payload = request.form.get("payload")
@@ -304,9 +343,7 @@ def slack_actions():
             print(f"Error decoding JSON payload: {e}")
             return "", 400
 
-    # Debugging outputs
-    print("Complete Payload:", payload)
-    print("Payload Actions:", payload.get("actions"))
+
 
     # Check and handle the action
     actions = payload.get("actions", [])
@@ -586,7 +623,7 @@ def slack_actions():
                 del user_profiles[user_id]  # Remove the custom profile
 
             # Update the home tab after resetting
-            update_home_tab({"event": {"user": user_id}})
+            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id))
             return jsonify({"response_action": "clear"}), 200
         
         elif action_id == "cancel_reset_button":
@@ -658,9 +695,6 @@ def slack_actions():
             )
 
         elif action_id == "view_profile_button":
-            # Check payload structure
-            print("Payload Actions:", payload["actions"])  # Debugging line
-            print("Full Payload:", payload)
 
             # Safely get user ID from the action payload
             if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
@@ -759,10 +793,58 @@ def slack_actions():
             else:
                 print("payload['actions'] is not as expected:", payload.get("actions"))
 
+        elif action_id == "opt_in_button":
+            trigger_id = data["trigger_id"]
+            client.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "callback_id": "opt_in_confirmation",
+                    "title": {"type": "plain_text", "text": "Confirm Opt-In"},
+                    "blocks": [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": "Are you sure you want to opt-in?"}},
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Yes, Opt In"},
+                                    "value": "yes_opt_in",
+                                    "action_id": "confirm_opt_in"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Cancel"},
+                                    "value": "cancel_opt_in",
+                                    "action_id": "cancel_opt_in"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
 
+        elif action_id == "confirm_opt_in":
+            user_id = data["user"]["id"]
+            full_name = load_profile_from_db(user_id).get("full_name", "Anonymous")
+
+            # Update opt-in status in DB and change the button to "Opt Out"
+            opt_in_user(user_id, full_name)
+            update_home_tab(user_id, True)   # True indicates "opted in"
+        
+        elif action_id == "cancel_opt_in":
+            # Close the modal without any action on "Cancel"
+            client.views_open(trigger_id=data["trigger_id"], view={"type": "modal", "title": "Cancelled", "close": {"type": "plain_text", "text": "Close"}})
+
+        elif action_id == "opt_out_button":
+            user_id = data["user"]["id"]
+
+            # Update opt-out status in DB and revert the button to "Opt In"
+            opt_out_user(user_id)
+            update_home_tab(user_id, False)  # False indicates "opted out"
+
+    
     elif data["type"] == "view_submission":
-        # Debug: Print the entire payload to check its structure
-        print("View Submission Payload:", json.dumps(data, indent=2))  # Pretty-print the payload
 
         # Handle modal submissions
         user_id = data["user"]["id"]
@@ -796,17 +878,15 @@ def slack_actions():
                 "ask_me_about": ask_me_about if ask_me_about else None,
             }
 
-            # Debug: Print profile before saving
-            print(f"Saving profile for {user_id}: {user_profiles[user_id]}")
+
 
             # Save the profile to the database
             try:
                 save_profile_to_db(user_id, user_profiles[user_id])
-                print(f"Profile saved to database for user {user_id}")
             except Exception as e:
                 print(f"Error saving profile to database: {e}")
             # Update the Home Tab to reflect the new profile information
-            update_home_tab({"event": {"user": user_id}})
+            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id))
 
         elif data["view"]["callback_id"] == "introduce_yourself_modal":
             # Existing "Introduce Yourself" submission handling (no changes)
@@ -827,10 +907,6 @@ def slack_actions():
             if selected_channel_block:
                 selected_channel = selected_channel_block["selected_option"]["value"]
 
-            # Debug: Print the user ID and introduction
-            print(f"User ID: {user_id}")
-            print(f"Introduction: {introduction}")
-            print(f"Selected Channel ID: {selected_channel}")
 
             # Send the introduction to the selected channel
             if introduction and selected_channel:
@@ -880,6 +956,11 @@ def slack_actions():
                 print("Introduction or channel selection is missing.")
 
     return "", 200
+
+# Set up scheduler
+scheduler = BackgroundScheduler()
+scheduler.add_job(pair_users_weekly, 'interval', weeks=1)
+scheduler.start()
 
 
 #ngrok testing
