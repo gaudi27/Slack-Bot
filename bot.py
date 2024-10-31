@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify
 from sqlConnector import load_profile_from_db, save_profile_to_db, opt_in_user, opt_out_user, is_user_opted_in, pair_users_weekly
 from slack_sdk.errors import SlackApiError
 from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
 
 
 env_path = Path('.') / '.env'
@@ -24,6 +25,9 @@ client = slack_sdk.WebClient(token= os.environ['SLACK_TOKEN'])
 
 # Send a test message when the bot starts
 #client.chat_postMessage(channel='#test', text="Hello World!")
+
+# Get ID of a Slack server
+team_id = client.auth_test()['team_id']
 
 # Gives id of bot
 BOT_ID = client.api_call("auth.test")['user_id']
@@ -109,7 +113,7 @@ user_profiles = {}
 
 def send_introduction_message(user_id, channel_id, intro_text):
     # Fetch the user’s profile from the database
-    profile = load_profile_from_db(user_id)
+    profile = load_profile_from_db(user_id, team_id)
 
     # Default to the user's name if no profile is found
     full_name = profile.get("full_name", "User")
@@ -140,6 +144,32 @@ def send_introduction_message(user_id, channel_id, intro_text):
         ]
     )
 
+next_pairing_time = None
+
+# Calculate countdown based on the next_pairing_time
+def calculate_countdown():
+    now = datetime.now()
+    
+    # Update `next_pairing_time` if it is not set or has passed
+    global next_pairing_time
+    if not next_pairing_time or now >= next_pairing_time:
+        next_pairing_time = now + timedelta(minutes=1)  # Set for an hourly interval, adjust as needed
+
+    # Calculate time remaining until the next pairing
+    time_remaining = next_pairing_time - now
+    days = time_remaining.days
+    hours, remainder = divmod(time_remaining.seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    # Display countdown format based on time left
+    if days > 0:
+        return f"{days} days, {hours} hours, and {minutes} minutes"
+    elif hours > 0:
+        return f"{hours} hours and {minutes} minutes"
+    else:
+        return f"{minutes} minutes"
+    
+
 # Handle app_home_opened event to update the Home Tab
 @slack_event_adapter.on("app_home_opened")
 def update_home_tab(event_data, opted_in=False):
@@ -155,6 +185,9 @@ def update_home_tab(event_data, opted_in=False):
         button_value = "opt_in"
         action_id = "opt_in_button"
 
+
+    countdown_text = calculate_countdown()
+
     try:
         # Default info
         user_info = client.users_info(user=user_id)
@@ -162,7 +195,7 @@ def update_home_tab(event_data, opted_in=False):
         profile_picture_url = user_info['user']['profile'].get('image_192', '')  # Get the profile picture URL
 
         # Get profile from db
-        profile = load_profile_from_db(user_id)
+        profile = load_profile_from_db(user_id, team_id)
 
         # If not in database, provide default info
         if not profile:
@@ -291,7 +324,9 @@ def update_home_tab(event_data, opted_in=False):
                     "text": 
                             "The Viaka Slack App provides automated intros with someone random in the community "
                             "and will give you a little blurb about who they are and what their interests are. "
-                            "You may also view their profile beforehand to get to know more about them."
+                            "You may also view their profile beforehand to get to know more about them. "
+                            "*Please update your profile before using this feature.*\n\n"
+                            f"_Random Introductions will match in {countdown_text}_"
                 }
             },
             {
@@ -357,7 +392,7 @@ def slack_actions():
         user_id = data["user"]["id"]
         action_id = data["actions"][0]["action_id"]
 
-        profile = load_profile_from_db(user_id) or {}  # Ensure profile is at least an empty dict
+        profile = load_profile_from_db(user_id, team_id) or {}  # Ensure profile is at least an empty dict
 
         # Handle the profile button interaction
         if action_id == "update_profile_button":
@@ -623,7 +658,7 @@ def slack_actions():
                 del user_profiles[user_id]  # Remove the custom profile
 
             # Update the home tab after resetting
-            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id))
+            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id, team_id))
             return jsonify({"response_action": "clear"}), 200
         
         elif action_id == "cancel_reset_button":
@@ -701,7 +736,7 @@ def slack_actions():
                 profile_user_id = payload["actions"][0].get("value")
 
                 if profile_user_id:
-                    profile = load_profile_from_db(profile_user_id)
+                    profile = load_profile_from_db(profile_user_id, team_id)
 
                     # Fetch the user's profile information from Slack (to get the profile picture)
                     try:
@@ -826,24 +861,114 @@ def slack_actions():
 
         elif action_id == "confirm_opt_in":
             user_id = data["user"]["id"]
-            full_name = load_profile_from_db(user_id).get("full_name", "Anonymous")
+            full_name = load_profile_from_db(user_id, team_id).get("full_name", "Anonymous")
 
             # Update opt-in status in DB and change the button to "Opt Out"
-            opt_in_user(user_id, full_name)
-            update_home_tab(user_id, True)   # True indicates "opted in"
+            opt_in_user(user_id, team_id, full_name)
+            update_home_tab({"event": {"user": user_id}}, True)   # True indicates "opted in"
+
+            trigger_id = data["trigger_id"]
+            client.views_update(
+                view_id=data["view"]["id"],
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Opted In"},
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "You're now opted in! 🎉"}
+                        }
+                    ]
+                }
+            )
         
         elif action_id == "cancel_opt_in":
             # Close the modal without any action on "Cancel"
-            client.views_open(trigger_id=data["trigger_id"], view={"type": "modal", "title": "Cancelled", "close": {"type": "plain_text", "text": "Close"}})
+            trigger_id = data["trigger_id"]
+            client.views_update(
+                view_id=data["view"]["id"],
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Cancelled"},
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "Your request has been cancelled."}
+                        }
+                    ],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+            )
 
         elif action_id == "opt_out_button":
+            trigger_id = data["trigger_id"]
+            client.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "callback_id": "opt_in_confirmation",
+                    "title": {"type": "plain_text", "text": "Confirm Opt-Out"},
+                    "blocks": [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": "Are you sure you want to opt-out?"}},
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Yes, Opt Out"},
+                                    "value": "yes_opt_out",
+                                    "action_id": "confirm_opt_out"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Cancel"},
+                                    "value": "cancel_opt_out",
+                                    "action_id": "cancel_opt_out"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
+        elif action_id == "confirm_opt_out":
             user_id = data["user"]["id"]
 
             # Update opt-out status in DB and revert the button to "Opt In"
-            opt_out_user(user_id)
-            update_home_tab(user_id, False)  # False indicates "opted out"
+            opt_out_user(user_id, team_id)
+            update_home_tab({"event": {"user": user_id}}, False)  # False indicates "opted out"
+           
+            trigger_id = data["trigger_id"]
+            client.views_update(
+                view_id=data["view"]["id"],
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Opted Out"},
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "You're now opted out :( you can always opt back in by clicking the Opt in button again :)"}
+                        }
+                    ]
+                }
+            )
+        elif action_id == "cancel_opt_out":
+            # Close the modal without any action on "Cancel"
+            trigger_id = data["trigger_id"]
+            client.views_update(
+                view_id=data["view"]["id"],
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Cancelled"},
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "Your request has been cancelled."}
+                        }
+                    ],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+            )
 
-    
     elif data["type"] == "view_submission":
 
         # Handle modal submissions
@@ -882,11 +1007,11 @@ def slack_actions():
 
             # Save the profile to the database
             try:
-                save_profile_to_db(user_id, user_profiles[user_id])
+                save_profile_to_db(user_id, user_profiles[user_id], team_id)
             except Exception as e:
                 print(f"Error saving profile to database: {e}")
             # Update the Home Tab to reflect the new profile information
-            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id))
+            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id, team_id))
 
         elif data["view"]["callback_id"] == "introduce_yourself_modal":
             # Existing "Introduce Yourself" submission handling (no changes)
@@ -959,7 +1084,7 @@ def slack_actions():
 
 # Set up scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(pair_users_weekly, 'interval', weeks=1)
+scheduler.add_job(pair_users_weekly, 'interval', hours=1)
 scheduler.start()
 
 
