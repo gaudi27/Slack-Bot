@@ -969,49 +969,546 @@ def slack_actions():
                 }
             )
 
-    elif data["type"] == "view_submission":
+        elif action_id == "view_profile_button1":
+            print("hello")
+            # Safely get user ID from the action payload
+            if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
+                profile_user_id = payload["actions"][0].get("value")
 
-        # Handle modal submissions
-        user_id = data["user"]["id"]
+                if profile_user_id:
+                    profile = load_profile_from_db(profile_user_id, team_id)
 
-        # Check if the submission is from the profile creation modal
-        # Handle modal submissions
-        if data["view"]["callback_id"] == "profile_creation_modal":
-            # Extract user inputs, initializing empty values for optional fields
-            full_name = data["view"]["state"]["values"].get("full_name_input", {}).get("full_name", {}).get("value", "")
-            bio = data["view"]["state"]["values"].get("bio_input", {}).get("bio", {}).get("value", "")
-            pronouns = data["view"]["state"]["values"].get("pronouns_input", {}).get("pronouns", {}).get("value", "")
-            location = data["view"]["state"]["values"].get("location_input", {}).get("location", {}).get("value", "")
-            hometown = data["view"]["state"]["values"].get("hometown_input", {}).get("hometown", {}).get("value", "")
-            education = data["view"]["state"]["values"].get("education_input", {}).get("education", {}).get("value", "")
-            languages = data["view"]["state"]["values"].get("languages_input", {}).get("languages", {}).get("value", "")
-            hobbies = data["view"]["state"]["values"].get("hobbies_input", {}).get("hobbies", {}).get("value", "")
-            birthday = data["view"]["state"]["values"].get("birthday_input", {}).get("birthday", {}).get("value", "")
-            ask_me_about = data["view"]["state"]["values"].get("ask_me_about_input", {}).get("ask_me_about", {}).get("value", "")
+                    # Fetch the user's profile information from Slack (to get the profile picture)
+                    try:
+                        user_info = client.users_info(user=profile_user_id)
+                        profile_pic_url = user_info["user"]["profile"].get("image_512")  # Use a larger image size
+                        user_name = user_info["user"]["real_name"]
+                    except Exception as e:
+                        print(f"Error fetching user info: {e}")
+                        profile_pic_url = None
+                        user_name = "Unknown User"
 
-            # Store the profile in our simulated storage only if the field is not empty
-            user_profiles[user_id] = {
-                "full_name": full_name if full_name else None,
-                "bio": bio if bio else None,
-                "pronouns": pronouns if pronouns else None,
-                "location": location if location else None,
-                "hometown": hometown if hometown else None,
-                "education": education if education else None,
-                "languages": languages if languages else None,
-                "hobbies": hobbies if hobbies else None,
-                "birthday": birthday if birthday else None,
-                "ask_me_about": ask_me_about if ask_me_about else None,
-            }
+                    if profile is None:
+                        # Show message if no profile data exists
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": "No profile available for this user."}
+                                }
+                            ]
+                        }
+                    else:
+                        # Construct profile modal using profile data
+                        profile_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Profile of {user_name}*"
+                                },
+                                "accessory": {
+                                    "type": "image",
+                                    "image_url": profile_pic_url,
+                                    "alt_text": f"{user_name}'s profile picture"
+                                }
+                            },
+                            {"type": "divider"},
+                        ]
+
+                        # Construct fields with emojis for each profile attribute
+                        profile_fields = []
+                        if profile.get("full_name"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Full Name:* {profile.get('full_name', 'N/A')}"})
+                        if profile.get("pronouns"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Pronouns:* {profile.get('pronouns', 'N/A')}"})
+                        if profile.get("location"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":round_pushpin: *Location:* {profile.get('location', 'N/A')}"})
+                        if profile.get("hometown"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":house: *Hometown:* {profile.get('hometown', 'N/A')}"})
+                        if profile.get("education"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":mortar_board: *Education:* {profile.get('education', 'N/A')}"})
+                        if profile.get("languages"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":speech_balloon: *Languages:* {profile.get(profile.get('languages', 'N/A'))}"})
+                        if profile.get("hobbies"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":clapper: *Hobbies:* {profile.get(profile.get('hobbies', 'N/A'))}"})
+                        if profile.get("birthday"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":birthday: *Birthday:* {profile.get('birthday', 'N/A')}"})
+                        if profile.get("ask_me_about"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":bulb: *Ask Me About:* {profile.get(profile.get('ask_me_about', 'N/A'))}"})
+
+                        # Add fields to the profile blocks
+                        profile_blocks.append({
+                            "type": "section",
+                            "fields": profile_fields
+                        })
+                        
+                        # Add bio if available
+                        profile_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": profile.get("bio", "No bio available.")}
+                        })
+
+                        # Construct the full profile modal
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": profile_blocks
+                        }
+
+                    # Open the modal to view the profile
+                    client.views_open(
+                        trigger_id=payload["trigger_id"],
+                        view=profile_modal
+                    )
+                else:
+                    print("profile_user_id is missing or None.")
+            else:
+                print("payload['actions'] is not as expected:", payload.get("actions"))
+
+    
+
+        elif action_id == "view_profile_button2":
+            print("hello")
+            # Safely get user ID from the action payload
+            if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
+                profile_user_id = payload["actions"][0].get("value")
+
+                if profile_user_id:
+                    profile = load_profile_from_db(profile_user_id, team_id)
+
+                    # Fetch the user's profile information from Slack (to get the profile picture)
+                    try:
+                        user_info = client.users_info(user=profile_user_id)
+                        profile_pic_url = user_info["user"]["profile"].get("image_512")  # Use a larger image size
+                        user_name = user_info["user"]["real_name"]
+                    except Exception as e:
+                        print(f"Error fetching user info: {e}")
+                        profile_pic_url = None
+                        user_name = "Unknown User"
+
+                    if profile is None:
+                        # Show message if no profile data exists
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": "No profile available for this user."}
+                                }
+                            ]
+                        }
+                    else:
+                        # Construct profile modal using profile data
+                        profile_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Profile of {user_name}*"
+                                },
+                                "accessory": {
+                                    "type": "image",
+                                    "image_url": profile_pic_url,
+                                    "alt_text": f"{user_name}'s profile picture"
+                                }
+                            },
+                            {"type": "divider"},
+                        ]
+
+                        # Construct fields with emojis for each profile attribute
+                        profile_fields = []
+                        if profile.get("full_name"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Full Name:* {profile.get('full_name', 'N/A')}"})
+                        if profile.get("pronouns"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Pronouns:* {profile.get('pronouns', 'N/A')}"})
+                        if profile.get("location"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":round_pushpin: *Location:* {profile.get('location', 'N/A')}"})
+                        if profile.get("hometown"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":house: *Hometown:* {profile.get('hometown', 'N/A')}"})
+                        if profile.get("education"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":mortar_board: *Education:* {profile.get('education', 'N/A')}"})
+                        if profile.get("languages"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":speech_balloon: *Languages:* {profile.get(profile.get('languages', 'N/A'))}"})
+                        if profile.get("hobbies"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":clapper: *Hobbies:* {profile.get(profile.get('hobbies', 'N/A'))}"})
+                        if profile.get("birthday"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":birthday: *Birthday:* {profile.get('birthday', 'N/A')}"})
+                        if profile.get("ask_me_about"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":bulb: *Ask Me About:* {profile.get(profile.get('ask_me_about', 'N/A'))}"})
+
+                        # Add fields to the profile blocks
+                        profile_blocks.append({
+                            "type": "section",
+                            "fields": profile_fields
+                        })
+                        
+                        # Add bio if available
+                        profile_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": profile.get("bio", "No bio available.")}
+                        })
+
+                        # Construct the full profile modal
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": profile_blocks
+                        }
+
+                    # Open the modal to view the profile
+                    client.views_open(
+                        trigger_id=payload["trigger_id"],
+                        view=profile_modal
+                    )
+                else:
+                    print("profile_user_id is missing or None.")
+            else:
+                print("payload['actions'] is not as expected:", payload.get("actions"))
+
+        elif action_id == "view_profile_button3":
+            print("hello")
+            # Safely get user ID from the action payload
+            if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
+                profile_user_id = payload["actions"][0].get("value")
+
+                if profile_user_id:
+                    profile = load_profile_from_db(profile_user_id, team_id)
+
+                    # Fetch the user's profile information from Slack (to get the profile picture)
+                    try:
+                        user_info = client.users_info(user=profile_user_id)
+                        profile_pic_url = user_info["user"]["profile"].get("image_512")  # Use a larger image size
+                        user_name = user_info["user"]["real_name"]
+                    except Exception as e:
+                        print(f"Error fetching user info: {e}")
+                        profile_pic_url = None
+                        user_name = "Unknown User"
+
+                    if profile is None:
+                        # Show message if no profile data exists
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": "No profile available for this user."}
+                                }
+                            ]
+                        }
+                    else:
+                        # Construct profile modal using profile data
+                        profile_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Profile of {user_name}*"
+                                },
+                                "accessory": {
+                                    "type": "image",
+                                    "image_url": profile_pic_url,
+                                    "alt_text": f"{user_name}'s profile picture"
+                                }
+                            },
+                            {"type": "divider"},
+                        ]
+
+                        # Construct fields with emojis for each profile attribute
+                        profile_fields = []
+                        if profile.get("full_name"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Full Name:* {profile.get('full_name', 'N/A')}"})
+                        if profile.get("pronouns"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Pronouns:* {profile.get('pronouns', 'N/A')}"})
+                        if profile.get("location"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":round_pushpin: *Location:* {profile.get('location', 'N/A')}"})
+                        if profile.get("hometown"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":house: *Hometown:* {profile.get('hometown', 'N/A')}"})
+                        if profile.get("education"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":mortar_board: *Education:* {profile.get('education', 'N/A')}"})
+                        if profile.get("languages"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":speech_balloon: *Languages:* {profile.get(profile.get('languages', 'N/A'))}"})
+                        if profile.get("hobbies"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":clapper: *Hobbies:* {profile.get(profile.get('hobbies', 'N/A'))}"})
+                        if profile.get("birthday"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":birthday: *Birthday:* {profile.get('birthday', 'N/A')}"})
+                        if profile.get("ask_me_about"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":bulb: *Ask Me About:* {profile.get(profile.get('ask_me_about', 'N/A'))}"})
+
+                        # Add fields to the profile blocks
+                        profile_blocks.append({
+                            "type": "section",
+                            "fields": profile_fields
+                        })
+                        
+                        # Add bio if available
+                        profile_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": profile.get("bio", "No bio available.")}
+                        })
+
+                        # Construct the full profile modal
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": profile_blocks
+                        }
+
+                    # Open the modal to view the profile
+                    client.views_open(
+                        trigger_id=payload["trigger_id"],
+                        view=profile_modal
+                    )
+                else:
+                    print("profile_user_id is missing or None.")
+            else:
+                print("payload['actions'] is not as expected:", payload.get("actions"))
+
+        elif action_id == "view_profile_button4":
+            print("hello")
+            # Safely get user ID from the action payload
+            if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
+                profile_user_id = payload["actions"][0].get("value")
+
+                if profile_user_id:
+                    profile = load_profile_from_db(profile_user_id, team_id)
+
+                    # Fetch the user's profile information from Slack (to get the profile picture)
+                    try:
+                        user_info = client.users_info(user=profile_user_id)
+                        profile_pic_url = user_info["user"]["profile"].get("image_512")  # Use a larger image size
+                        user_name = user_info["user"]["real_name"]
+                    except Exception as e:
+                        print(f"Error fetching user info: {e}")
+                        profile_pic_url = None
+                        user_name = "Unknown User"
+
+                    if profile is None:
+                        # Show message if no profile data exists
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": "No profile available for this user."}
+                                }
+                            ]
+                        }
+                    else:
+                        # Construct profile modal using profile data
+                        profile_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Profile of {user_name}*"
+                                },
+                                "accessory": {
+                                    "type": "image",
+                                    "image_url": profile_pic_url,
+                                    "alt_text": f"{user_name}'s profile picture"
+                                }
+                            },
+                            {"type": "divider"},
+                        ]
+
+                        # Construct fields with emojis for each profile attribute
+                        profile_fields = []
+                        if profile.get("full_name"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Full Name:* {profile.get('full_name', 'N/A')}"})
+                        if profile.get("pronouns"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Pronouns:* {profile.get('pronouns', 'N/A')}"})
+                        if profile.get("location"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":round_pushpin: *Location:* {profile.get('location', 'N/A')}"})
+                        if profile.get("hometown"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":house: *Hometown:* {profile.get('hometown', 'N/A')}"})
+                        if profile.get("education"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":mortar_board: *Education:* {profile.get('education', 'N/A')}"})
+                        if profile.get("languages"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":speech_balloon: *Languages:* {profile.get(profile.get('languages', 'N/A'))}"})
+                        if profile.get("hobbies"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":clapper: *Hobbies:* {profile.get(profile.get('hobbies', 'N/A'))}"})
+                        if profile.get("birthday"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":birthday: *Birthday:* {profile.get('birthday', 'N/A')}"})
+                        if profile.get("ask_me_about"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":bulb: *Ask Me About:* {profile.get(profile.get('ask_me_about', 'N/A'))}"})
+
+                        # Add fields to the profile blocks
+                        profile_blocks.append({
+                            "type": "section",
+                            "fields": profile_fields
+                        })
+                        
+                        # Add bio if available
+                        profile_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": profile.get("bio", "No bio available.")}
+                        })
+
+                        # Construct the full profile modal
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": profile_blocks
+                        }
+
+                    # Open the modal to view the profile
+                    client.views_open(
+                        trigger_id=payload["trigger_id"],
+                        view=profile_modal
+                    )
+                else:
+                    print("profile_user_id is missing or None.")
+            else:
+                print("payload['actions'] is not as expected:", payload.get("actions"))
+
+        elif action_id == "view_profile_button5":
+            print("hello")
+            # Safely get user ID from the action payload
+            if isinstance(payload.get("actions"), list) and len(payload["actions"]) > 0:
+                profile_user_id = payload["actions"][0].get("value")
+
+                if profile_user_id:
+                    profile = load_profile_from_db(profile_user_id, team_id)
+
+                    # Fetch the user's profile information from Slack (to get the profile picture)
+                    try:
+                        user_info = client.users_info(user=profile_user_id)
+                        profile_pic_url = user_info["user"]["profile"].get("image_512")  # Use a larger image size
+                        user_name = user_info["user"]["real_name"]
+                    except Exception as e:
+                        print(f"Error fetching user info: {e}")
+                        profile_pic_url = None
+                        user_name = "Unknown User"
+
+                    if profile is None:
+                        # Show message if no profile data exists
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": [
+                                {
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": "No profile available for this user."}
+                                }
+                            ]
+                        }
+                    else:
+                        # Construct profile modal using profile data
+                        profile_blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*Profile of {user_name}*"
+                                },
+                                "accessory": {
+                                    "type": "image",
+                                    "image_url": profile_pic_url,
+                                    "alt_text": f"{user_name}'s profile picture"
+                                }
+                            },
+                            {"type": "divider"},
+                        ]
+
+                        # Construct fields with emojis for each profile attribute
+                        profile_fields = []
+                        if profile.get("full_name"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Full Name:* {profile.get('full_name', 'N/A')}"})
+                        if profile.get("pronouns"):
+                            profile_fields.append({"type": "mrkdwn", "text": f"*Pronouns:* {profile.get('pronouns', 'N/A')}"})
+                        if profile.get("location"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":round_pushpin: *Location:* {profile.get('location', 'N/A')}"})
+                        if profile.get("hometown"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":house: *Hometown:* {profile.get('hometown', 'N/A')}"})
+                        if profile.get("education"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":mortar_board: *Education:* {profile.get('education', 'N/A')}"})
+                        if profile.get("languages"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":speech_balloon: *Languages:* {profile.get(profile.get('languages', 'N/A'))}"})
+                        if profile.get("hobbies"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":clapper: *Hobbies:* {profile.get(profile.get('hobbies', 'N/A'))}"})
+                        if profile.get("birthday"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":birthday: *Birthday:* {profile.get('birthday', 'N/A')}"})
+                        if profile.get("ask_me_about"):
+                            profile_fields.append({"type": "mrkdwn", "text": f":bulb: *Ask Me About:* {profile.get(profile.get('ask_me_about', 'N/A'))}"})
+
+                        # Add fields to the profile blocks
+                        profile_blocks.append({
+                            "type": "section",
+                            "fields": profile_fields
+                        })
+                        
+                        # Add bio if available
+                        profile_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": profile.get("bio", "No bio available.")}
+                        })
+
+                        # Construct the full profile modal
+                        profile_modal = {
+                            "type": "modal",
+                            "title": {"type": "plain_text", "text": "User Profile"},
+                            "blocks": profile_blocks
+                        }
+
+                    # Open the modal to view the profile
+                    client.views_open(
+                        trigger_id=payload["trigger_id"],
+                        view=profile_modal
+                    )
+                else:
+                    print("profile_user_id is missing or None.")
+            else:
+                print("payload['actions'] is not as expected:", payload.get("actions"))
+
+                
+        elif data["type"] == "view_submission":
+            # Handle modal submissions
+            user_id = data["user"]["id"]
+
+            # Check if the submission is from the profile creation modal
+            # Handle modal submissions
+            if data["view"]["callback_id"] == "profile_creation_modal":
+                # Extract user inputs, initializing empty values for optional fields
+                full_name = data["view"]["state"]["values"].get("full_name_input", {}).get("full_name", {}).get("value", "")
+                bio = data["view"]["state"]["values"].get("bio_input", {}).get("bio", {}).get("value", "")
+                pronouns = data["view"]["state"]["values"].get("pronouns_input", {}).get("pronouns", {}).get("value", "")
+                location = data["view"]["state"]["values"].get("location_input", {}).get("location", {}).get("value", "")
+                hometown = data["view"]["state"]["values"].get("hometown_input", {}).get("hometown", {}).get("value", "")
+                education = data["view"]["state"]["values"].get("education_input", {}).get("education", {}).get("value", "")
+                languages = data["view"]["state"]["values"].get("languages_input", {}).get("languages", {}).get("value", "")
+                hobbies = data["view"]["state"]["values"].get("hobbies_input", {}).get("hobbies", {}).get("value", "")
+                birthday = data["view"]["state"]["values"].get("birthday_input", {}).get("birthday", {}).get("value", "")
+                ask_me_about = data["view"]["state"]["values"].get("ask_me_about_input", {}).get("ask_me_about", {}).get("value", "")
+
+                # Store the profile in our simulated storage only if the field is not empty
+                user_profiles[user_id] = {
+                    "full_name": full_name if full_name else None,
+                    "bio": bio if bio else None,
+                    "pronouns": pronouns if pronouns else None,
+                    "location": location if location else None,
+                    "hometown": hometown if hometown else None,
+                    "education": education if education else None,
+                    "languages": languages if languages else None,
+                    "hobbies": hobbies if hobbies else None,
+                    "birthday": birthday if birthday else None,
+                    "ask_me_about": ask_me_about if ask_me_about else None,
+                }
 
 
 
-            # Save the profile to the database
-            try:
-                save_profile_to_db(user_id, user_profiles[user_id], team_id)
-            except Exception as e:
-                print(f"Error saving profile to database: {e}")
-            # Update the Home Tab to reflect the new profile information
-            update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id, team_id))
+                # Save the profile to the database
+                try:
+                    save_profile_to_db(user_id, user_profiles[user_id], team_id)
+                except Exception as e:
+                    print(f"Error saving profile to database: {e}")
+                # Update the Home Tab to reflect the new profile information
+                update_home_tab({"event": {"user": user_id}}, is_user_opted_in(user_id, team_id))
 
         elif data["view"]["callback_id"] == "introduce_yourself_modal":
             # Existing "Introduce Yourself" submission handling (no changes)
@@ -1084,7 +1581,7 @@ def slack_actions():
 
 # Set up scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(pair_users_weekly, 'interval', hours=1)
+scheduler.add_job(pair_users_weekly, 'interval', minutes=1)
 scheduler.start()
 
 
