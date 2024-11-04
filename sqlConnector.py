@@ -24,7 +24,7 @@ def connect_to_db():
     return mysql.connector.connect(
         host="localhost",
         user="gaudi",
-        password="WellesleY!738",
+        password="mypassword",
         database="slackdb"
     )
 
@@ -122,7 +122,38 @@ def opt_out_user(user_id, team_id):
 
 
 
-from slack_sdk import WebClient
+def check_pairing_exists(cursor, user1, user2, team_id):
+    # Check if a pairing between two users already exists
+    cursor.execute(
+        "SELECT COUNT(*) FROM pairings WHERE team_id = %s AND "
+        "((user_id1 = %s AND user_id2 = %s) OR (user_id1 = %s AND user_id2 = %s))",
+        (team_id, user1, user2, user2, user1)
+    )
+    count = cursor.fetchone()["COUNT(*)"]
+    return count > 0
+
+def all_users_already_paired(cursor, users, team_id):
+    num_users = len(users)
+
+    # Quick checks
+    if num_users < 2:
+        return True  # No pairs can be formed with less than 2 users
+
+    # Retrieve existing pairs and store in a set
+    cursor.execute("SELECT user_id1, user_id2 FROM pairings WHERE team_id = %s", (team_id,))
+    existing_pairs = set()
+    
+    for row in cursor.fetchall():
+        existing_pairs.add(frozenset([row['user_id1'], row['user_id2']]))
+
+    # Check if all combinations of the users have already been paired
+    for i in range(num_users):
+        for j in range(i + 1, num_users):
+            if frozenset([users[i], users[j]]) not in existing_pairs:
+                return False
+
+    return True
+
 
 def pair_users_weekly():
     db = connect_to_db()
@@ -138,94 +169,138 @@ def pair_users_weekly():
         # Fetch all opted-in users for this team
         cursor.execute("SELECT user_id FROM introductions WHERE team_id = %s", (team_id,))
         users = [row["user_id"] for row in cursor.fetchall()]
+        # Check if all users have already been paired
+        if len(users) < 2 or all_users_already_paired(cursor, users, team_id):
+            print(f"All users have already been paired or not enough users in team {team_id}. Skipping pairing.")
+            continue  # Skip pairing if all users are paired or if there are less than 2 users
 
         random.shuffle(users)
         pairs = []
 
         while len(users) > 1:
             if len(users) == 3:
-                # Pair as a trio
+                # Attempt to pair three users
                 user1, user2, user3 = users.pop(), users.pop(), users.pop()
-                pairs.append((user1, user2, user3))
-                group_dm = client.conversations_open(users=[user1, user2, user3])
 
-                # Message with buttons for viewing each other's profiles
-                blocks = [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f":wave: You've been paired with <@{user2}> and <@{user3}> this week!"
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "View Profile"
-                                },
-                                "value": user2,
-                                "action_id": "view_profile_button"
-                            },
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "View Profile"
-                                },
-                                "value": user3,
-                                "action_id": "view_profile_button"
+                # Check if any of the users have been paired together before
+                if (not check_pairing_exists(cursor, user1, user2, team_id) and
+                    not check_pairing_exists(cursor, user1, user3, team_id) and
+                    not check_pairing_exists(cursor, user2, user3, team_id)):
+                    
+                    pairs.append((user1, user2, user3))
+                    group_dm = client.conversations_open(users=[user1, user2, user3])
+
+                    # Message with buttons for viewing each other's profiles
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f":wave: You've been paired with <@{user2}> and <@{user3}> this week!"
                             }
-                        ]
-                    }
-                ]
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "View Profile"},
+                                    "value": user1,
+                                    "action_id": "view_profile_button1"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "View Profile"},
+                                    "value": user2,
+                                    "action_id": "view_profile_button2"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "View Profile"},
+                                    "value": user3,
+                                    "action_id": "view_profile_button3"
+                                }
+                            ]
+                        }
+                    ]
 
-                client.chat_postMessage(channel=group_dm["channel"]["id"], blocks=blocks)
+                    client.chat_postMessage(
+                        channel=group_dm["channel"]["id"],
+                        text="You've been paired with teammates this week!",
+                        blocks=blocks
+                    )
+
+                    # Log the pairing in the database
+                    cursor.execute(
+                        "INSERT INTO pairings (team_id, user_id1, user_id2) VALUES (%s, %s, %s)",
+                        (team_id, user1, user2)
+                    )
+                    cursor.execute(
+                        "INSERT INTO pairings (team_id, user_id1, user_id2) VALUES (%s, %s, %s)",
+                        (team_id, user1, user3)
+                    )
+                    cursor.execute(
+                        "INSERT INTO pairings (team_id, user_id1, user_id2) VALUES (%s, %s, %s)",
+                        (team_id, user2, user3)
+                    )
+                else:
+                    # If pairing is invalid, push users back and continue
+                    users.insert(0, user3)
+                    users.insert(0, user2)
+                    users.insert(0, user1)
 
             else:
-                # Pair as a duo
+                # Attempt to pair two users
                 user1, user2 = users.pop(), users.pop()
-                pairs.append((user1, user2))
-                group_dm = client.conversations_open(users=[user1, user2])
 
-                # Message with buttons for viewing each other's profiles
-                blocks = [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f":wave: You've been paired with <@{user1}> and <@{user2}> this week!"
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "View Profile"
-                                },
-                                "value": user1,
-                                "action_id": "view_profile_button"
-                            },
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "View Profile"
-                                },
-                                "value": user2,
-                                "action_id": "view_profile_button"
+                # Check if the pair has been paired together before
+                if not check_pairing_exists(cursor, user1, user2, team_id):
+                    pairs.append((user1, user2))
+                    group_dm = client.conversations_open(users=[user1, user2])
+
+                    # Message with buttons for viewing each other's profiles
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f":wave: You've been paired with <@{user1}> and <@{user2}> this week!"
                             }
-                        ]
-                    }
-                ]
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "View Profile"},
+                                    "value": user1,
+                                    "action_id": "view_profile_button4"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "View Profile"},
+                                    "value": user2,
+                                    "action_id": "view_profile_button5"
+                                }
+                            ]
+                        }
+                    ]
 
-                client.chat_postMessage(channel=group_dm["channel"]["id"], blocks=blocks)
+                    client.chat_postMessage(
+                        channel=group_dm["channel"]["id"],
+                        text="You've been paired with a teammate this week!",
+                        blocks=blocks
+                    )
+
+                    # Log the pairing in the database
+                    cursor.execute(
+                        "INSERT INTO pairings (team_id, user_id1, user_id2) VALUES (%s, %s, %s)",
+                        (team_id, user1, user2)
+                    )
+                else:
+                    # If pairing is invalid, push users back and continue
+                    users.insert(0, user2)
+                    users.insert(0, user1)
 
         # Remove paired users from introductions table for this team
         for pair in pairs:
@@ -235,6 +310,9 @@ def pair_users_weekly():
     db.commit()
     cursor.close()
     db.close()
+
+
+
 
 
 
